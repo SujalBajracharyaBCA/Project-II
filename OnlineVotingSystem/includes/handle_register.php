@@ -4,27 +4,8 @@ session_start();
 
 // Include the database connection file
 // IMPORTANT: Create this file and ensure it establishes a mysqli connection named $conn
-// Example db_connect.php:
-/*
-<?php
-$db_host = 'localhost'; // Usually localhost for XAMPP
-$db_user = 'root';      // Default XAMPP username
-$db_pass = '';          // Default XAMPP password (often empty)
-$db_name = 'voting_system'; // Your database name
 
-$conn = new mysqli($db_host, $db_user, $db_pass, $db_name);
-
-// Check connection
-if ($conn->connect_error) {
-    // Don't output detailed errors in production
-    die("Database connection failed. Please try again later.");
-    // Log detailed error: error_log("Connection failed: " . $conn->connect_error);
-}
-// Set character set (optional but recommended)
-$conn->set_charset("utf8mb4");
-?>
-*/
-require_once 'db_connect.php'; // Adjust path if necessary
+nce 'db_connect.php'; // Adjust path if necessary
 
 // --- Form Data Retrieval and Basic Sanitization ---
 // Check if the form was submitted using POST
