@@ -1,0 +1,132 @@
+-- SQL Commands to create tables for the Online Voting System
+-- Database: voting_system (Ensure this database exists)
+-- Using InnoDB engine for foreign key support
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `Users`
+-- Stores information about registered users (voters and administrators)
+--
+CREATE TABLE `Users` (
+  `UserID` INT AUTO_INCREMENT PRIMARY KEY,
+  `Username` VARCHAR(50) UNIQUE NOT NULL COMMENT 'Unique login identifier',
+  `HashedPassword` VARCHAR(255) NOT NULL COMMENT 'Stored password hash (use password_hash())',
+  `Email` VARCHAR(100) UNIQUE NOT NULL COMMENT 'Unique email address',
+  `FullName` VARCHAR(100) NULL COMMENT 'User''s full name',
+  `Role` ENUM('Voter', 'Admin') NOT NULL DEFAULT 'Voter' COMMENT 'User role',
+  `RegistrationDate` TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT 'When the user registered',
+  `IsActive` BOOLEAN DEFAULT TRUE COMMENT 'Flag to activate/deactivate user'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add index on Username and Email for faster lookups
+ALTER TABLE `Users` ADD INDEX `idx_username` (`Username`);
+ALTER TABLE `Users` ADD INDEX `idx_email` (`Email`);
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `Elections`
+-- Stores details about each election event
+--
+CREATE TABLE `Elections` (
+  `ElectionID` INT AUTO_INCREMENT PRIMARY KEY,
+  `Title` VARCHAR(255) NOT NULL COMMENT 'Name of the election',
+  `Description` TEXT NULL COMMENT 'Optional description of the election',
+  `StartDate` DATETIME NOT NULL COMMENT 'Date and time when voting starts',
+  `EndDate` DATETIME NOT NULL COMMENT 'Date and time when voting ends',
+  `VotingMethod` VARCHAR(50) NOT NULL COMMENT 'Identifier for the voting method (e.g., FPTP, RCV, Approval)',
+  `Status` ENUM('Pending', 'Active', 'Closed', 'Archived') NOT NULL DEFAULT 'Pending' COMMENT 'Current status of the election',
+  `CreatedByAdminID` INT NULL COMMENT 'Admin user who created the election',
+  `CreatedAt` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`CreatedByAdminID`) REFERENCES `Users`(`UserID`) ON DELETE SET NULL ON UPDATE CASCADE -- Link to creating admin
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add index on Status for filtering active/closed elections
+ALTER TABLE `Elections` ADD INDEX `idx_status` (`Status`);
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `Candidates`
+-- Stores information about candidates participating in elections
+--
+CREATE TABLE `Candidates` (
+  `CandidateID` INT AUTO_INCREMENT PRIMARY KEY,
+  `ElectionID` INT NOT NULL COMMENT 'Which election this candidate belongs to',
+  `Name` VARCHAR(150) NOT NULL COMMENT 'Candidate''s name',
+  `Description` TEXT NULL COMMENT 'Optional candidate details/bio',
+  `DisplayOrder` INT DEFAULT 0 COMMENT 'Optional order for ballot display',
+  FOREIGN KEY (`ElectionID`) REFERENCES `Elections`(`ElectionID`) ON DELETE CASCADE ON UPDATE CASCADE -- If election is deleted, candidates are removed
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add index on ElectionID for faster candidate retrieval per election
+ALTER TABLE `Candidates` ADD INDEX `idx_electionid` (`ElectionID`);
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `EligibleVoters`
+-- Defines which voters are eligible for specific elections (many-to-many link)
+--
+CREATE TABLE `EligibleVoters` (
+  `EligibilityID` INT AUTO_INCREMENT PRIMARY KEY,
+  `ElectionID` INT NOT NULL,
+  `UserID` INT NOT NULL,
+  `HasVoted` BOOLEAN DEFAULT FALSE COMMENT 'Flag to track if the user has cast their vote',
+  UNIQUE KEY `unique_voter_election` (`ElectionID`, `UserID`) COMMENT 'Ensures a voter is listed only once per election',
+  FOREIGN KEY (`ElectionID`) REFERENCES `Elections`(`ElectionID`) ON DELETE CASCADE ON UPDATE CASCADE,
+  FOREIGN KEY (`UserID`) REFERENCES `Users`(`UserID`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add indexes for faster lookups
+ALTER TABLE `EligibleVoters` ADD INDEX `idx_electionid` (`ElectionID`);
+ALTER TABLE `EligibleVoters` ADD INDEX `idx_userid` (`UserID`);
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `Votes`
+-- Stores the cast votes securely
+--
+CREATE TABLE `Votes` (
+  `VoteID` BIGINT AUTO_INCREMENT PRIMARY KEY, -- Use BIGINT if expecting very large number of votes
+  `ElectionID` INT NOT NULL,
+  `VoterID` INT NOT NULL COMMENT 'User who cast the vote',
+  `VoteData` TEXT NOT NULL COMMENT 'Stores the actual vote (e.g., CandidateID for FPTP, ranked list string/JSON for RCV, approved IDs string/JSON for Approval). Consider encryption.',
+  `ConfirmationCode` VARCHAR(50) UNIQUE NULL COMMENT 'Unique code given to voter after voting',
+  `Timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT 'When the vote was cast',
+  -- Note: We link VoterID here for audit, but rely on EligibleVoters.HasVoted to prevent double voting.
+  -- Alternatively, make (ElectionID, VoterID) unique here and remove HasVoted from EligibleVoters.
+  -- The current structure allows storing the vote while separately tracking voting status.
+  FOREIGN KEY (`ElectionID`) REFERENCES `Elections`(`ElectionID`) ON DELETE RESTRICT ON UPDATE CASCADE, -- Prevent deleting election if votes exist
+  FOREIGN KEY (`VoterID`) REFERENCES `Users`(`UserID`) ON DELETE RESTRICT ON UPDATE CASCADE -- Prevent deleting voter if votes exist
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add indexes
+ALTER TABLE `Votes` ADD INDEX `idx_electionid` (`ElectionID`);
+ALTER TABLE `Votes` ADD INDEX `idx_voterid` (`VoterID`);
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `AuditLog` (Optional but Recommended)
+-- Logs important system actions for auditing purposes
+--
+CREATE TABLE `AuditLog` (
+  `LogID` BIGINT AUTO_INCREMENT PRIMARY KEY,
+  `Timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `UserID` INT NULL COMMENT 'User performing the action (NULL if system action)',
+  `ActionType` VARCHAR(100) NOT NULL COMMENT 'e.g., LOGIN_SUCCESS, LOGIN_FAIL, VOTE_CAST, ELECTION_CREATED, USER_REGISTERED',
+  `Details` TEXT NULL COMMENT 'Additional details about the action',
+  `IPAddress` VARCHAR(45) NULL COMMENT 'IP address of the user',
+  FOREIGN KEY (`UserID`) REFERENCES `Users`(`UserID`) ON DELETE SET NULL ON UPDATE CASCADE -- Keep log even if user deleted
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add indexes
+ALTER TABLE `AuditLog` ADD INDEX `idx_userid` (`UserID`);
+ALTER TABLE `AuditLog` ADD INDEX `idx_actiontype` (`ActionType`);
+ALTER TABLE `AuditLog` ADD INDEX `idx_timestamp` (`Timestamp`);
+
+-- --------------------------------------------------------
+```h
