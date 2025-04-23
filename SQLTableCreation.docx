@@ -128,5 +128,4 @@ ALTER TABLE `AuditLog` ADD INDEX `idx_userid` (`UserID`);
 ALTER TABLE `AuditLog` ADD INDEX `idx_actiontype` (`ActionType`);
 ALTER TABLE `AuditLog` ADD INDEX `idx_timestamp` (`Timestamp`);
 
--- --------------------------------------------------------
-```h
+
