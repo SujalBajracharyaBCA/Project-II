@@ -128,4 +128,19 @@ ALTER TABLE `AuditLog` ADD INDEX `idx_userid` (`UserID`);
 ALTER TABLE `AuditLog` ADD INDEX `idx_actiontype` (`ActionType`);
 ALTER TABLE `AuditLog` ADD INDEX `idx_timestamp` (`Timestamp`);
 
+// You need a table (e.g., `PasswordResets`) to store these tokens.
+    // Example `PasswordResets` table structure:
+    /*
+    CREATE TABLE `PasswordResets` (
+      `ResetID` INT AUTO_INCREMENT PRIMARY KEY,
+      `UserID` INT NOT NULL,
+      `HashedToken` VARCHAR(255) NOT NULL,
+      `ExpiresAt` DATETIME NOT NULL,
+      `IsUsed` BOOLEAN DEFAULT FALSE,
+      `CreatedAt` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (`UserID`) REFERENCES `Users`(`UserID`) ON DELETE CASCADE ON UPDATE CASCADE,
+      INDEX `idx_token` (`HashedToken`(10)), -- Index part of the hash
+      INDEX `idx_userid` (`UserID`)
+    ) ENGINE=InnoDB;
+    */
 
