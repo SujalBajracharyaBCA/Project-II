@@ -32,6 +32,8 @@ try {
 }
 
 // Prepare SQL to get elections the user is eligible for
+// Fetching ResultsVisibility setting if it exists (assuming a Settings table or default)
+// For simplicity, we'll assume a default or handle it in the loop for now.
 $sql = "SELECT
             e.ElectionID,
             e.Title,
@@ -40,6 +42,7 @@ $sql = "SELECT
             e.EndDate,
             e.Status AS ElectionStatus,
             ev.HasVoted
+            -- Optional: Add e.ResultsVisibility if you implement per-election visibility
         FROM Elections e
         JOIN EligibleVoters ev ON e.ElectionID = ev.ElectionID
         WHERE ev.UserID = ?
@@ -57,17 +60,13 @@ if ($stmt) {
 
     if ($result) {
         while ($row = $result->fetch_assoc()) {
-            // Convert DB date strings into DateTime objects, assuming they are stored
-            // relative to the application's timezone ($app_timezone).
-            // If your DB stores UTC, you'd use a different timezone here for creation,
-            // then potentially convert for comparison/display if needed.
+            // Convert DB date strings into DateTime objects using the application's timezone.
             try {
-                // Explicitly create DateTime objects using the application's timezone
                 $row['StartDateDT'] = new DateTime($row['StartDate'], $app_timezone);
                 $row['EndDateDT'] = new DateTime($row['EndDate'], $app_timezone);
             } catch (Exception $e) {
                 error_log("Error parsing date for Election ID " . $row['ElectionID'] . ": " . $e->getMessage());
-                $row['StartDateDT'] = null; // Mark as invalid if parsing fails
+                $row['StartDateDT'] = null;
                 $row['EndDateDT'] = null;
             }
             $eligible_elections[] = $row;
@@ -95,6 +94,19 @@ $conn->close();
     <style>
         body { font-family: 'Inter', sans-serif; }
         .status-badge { padding: 0.2rem 0.75rem; font-size: 0.75rem; font-weight: 600; border-radius: 9999px; display: inline-block; text-align: center; }
+        .action-button {
+            font-weight: bold;
+            padding: 0.5rem 1rem; /* py-2 px-4 */
+            border-radius: 0.5rem; /* rounded-lg */
+            transition: background-color 0.3s;
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05); /* shadow */
+            font-size: 0.875rem; /* text-sm */
+            white-space: nowrap;
+            text-decoration: none;
+            display: inline-flex; /* Align icon */
+            align-items: center;
+        }
+        .action-button i { margin-right: 0.25rem; /* mr-1 */ }
     </style>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
@@ -146,70 +158,66 @@ $conn->close();
             <div class="space-y-6">
                 <?php foreach ($eligible_elections as $election): ?>
                     <?php
-                        // Determine Status, Message, and Votability
-                        $status_text = $election['ElectionStatus']; // Default to DB status
-                        $status_color = 'bg-gray-500 text-white'; // Default color
-                        $can_vote = false; // Can the user vote right now?
-                        $display_message = ''; // Message to display instead of button
+                        // Determine Status, Message, and Action Button
+                        $status_text = $election['ElectionStatus'];
+                        $status_color = 'bg-gray-500 text-white';
+                        $action_button = null; // Holds the HTML for the button/message
 
-                        $start_dt = $election['StartDateDT']; // DateTime object or null
-                        $end_dt = $election['EndDateDT'];   // DateTime object or null
-
-                        // --- Add Debug Output (View HTML Source) ---
-                        // echo "\n";
-                        // echo "\n";
-                        // echo "\n";
-                        // echo "\n";
-                        // echo "\n";
-                        // echo "\n";
-                        // echo "\n";
-                        // echo "\n";
-                        // --- End Debug Output ---
-
+                        $start_dt = $election['StartDateDT'];
+                        $end_dt = $election['EndDateDT'];
 
                         if (!$start_dt || !$end_dt) {
-                            // Handle case where dates are invalid in DB or couldn't be parsed
                             $status_text = 'Error';
                             $status_color = 'bg-black text-white';
-                            $display_message = 'Invalid date configuration';
+                            $action_button = '<span class="text-red-600 italic text-sm">Config Error</span>';
                         } elseif ($election['ElectionStatus'] === 'Closed') {
                             $status_text = 'Closed';
                             $status_color = 'bg-red-500 text-white';
-                            $display_message = 'Voting closed';
+                            // *** ADD RESULTS LINK HERE ***
+                            // Check ResultsVisibility setting here if implemented
+                            $action_button = '<a href="results.php?election_id=' . $election['ElectionID'] . '"
+                                               class="action-button bg-purple-600 hover:bg-purple-700 text-white">
+                                                <i class="fas fa-chart-bar"></i>View Results
+                                            </a>';
                         } elseif ($election['ElectionStatus'] === 'Archived') {
                             $status_text = 'Archived';
                             $status_color = 'bg-purple-500 text-white';
-                            $display_message = 'Election archived';
+                            $action_button = '<span class="text-gray-500 italic text-sm">Archived</span>';
                         } elseif ($now_dt < $start_dt) {
-                            // Current time is *before* the start date
                             $status_text = 'Upcoming';
-                            $status_color = 'bg-yellow-500 text-black'; // Use text-black for better contrast on yellow
-                            $display_message = 'Voting not started yet'; // More explicit message
+                            $status_color = 'bg-yellow-500 text-black';
+                            $action_button = '<span class="text-gray-500 italic text-sm">Voting starts ' . $start_dt->format('M j, g:i A') . '</span>';
                         } elseif ($now_dt > $end_dt) {
-                            // Current time is *after* the end date
-                            $status_text = 'Closed';
+                            // Should ideally be 'Closed' by now, but handle just in case
+                            $status_text = 'Ended';
                             $status_color = 'bg-red-500 text-white';
-                            $display_message = 'Voting has ended'; // More explicit message
-                            // Note: Ideally, a background job should set the DB status to 'Closed'
+                             // *** ADD RESULTS LINK HERE (if visible) ***
+                            $action_button = '<a href="results.php?election_id=' . $election['ElectionID'] . '"
+                                               class="action-button bg-purple-600 hover:bg-purple-700 text-white">
+                                                <i class="fas fa-chart-bar"></i>View Results
+                                            </a>';
+                            // Or show 'Voting Ended' if results aren't visible yet
+                            // $action_button = '<span class="text-gray-500 italic text-sm">Voting Ended</span>';
                         } else {
-                            // Current time is *within* the start and end date window
+                            // Within voting period
                             if ($election['ElectionStatus'] === 'Active') {
                                 $status_text = 'Active';
                                 $status_color = 'bg-green-500 text-white';
                                 if ($election['HasVoted']) {
-                                    $display_message = 'You have already voted';
+                                     $action_button = '<span class="text-green-600 italic text-sm font-semibold"><i class="fas fa-check mr-1"></i>Voted</span>';
                                 } else {
-                                    $can_vote = true; // All conditions met to vote!
+                                    $action_button = '<a href="vote.php?election_id=' . $election['ElectionID'] . '"
+                                                       class="action-button bg-blue-600 hover:bg-blue-700 text-white">
+                                                        <i class="fas fa-vote-yea"></i>Cast Vote
+                                                    </a>';
                                 }
                             } elseif ($election['ElectionStatus'] === 'Pending') {
-                                // Election is within time window but not yet activated by admin
                                 $status_text = 'Pending Activation';
                                 $status_color = 'bg-blue-500 text-white';
-                                $display_message = 'Waiting for admin activation';
+                                $action_button = '<span class="text-gray-500 italic text-sm">Waiting for activation</span>';
                             } else {
-                                // Handle any other unexpected DB status within the time window
-                                $status_text = $election['ElectionStatus']; // Show the DB status
-                                $display_message = 'Status: ' . $election['ElectionStatus'];
+                                $status_text = $election['ElectionStatus']; // Show unexpected status
+                                $action_button = '<span class="text-gray-500 italic text-sm">Status: ' . htmlspecialchars($status_text) . '</span>';
                             }
                         }
                     ?>
@@ -229,16 +237,7 @@ $conn->close();
                             <span class="status-badge <?php echo $status_color; ?>">
                                 <?php echo htmlspecialchars($status_text); ?>
                             </span>
-                            <?php if ($can_vote): ?>
-                                <a href="vote.php?election_id=<?php echo $election['ElectionID']; ?>"
-                                   class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 shadow text-sm whitespace-nowrap">
-                                    <i class="fas fa-vote-yea mr-1"></i>Cast Vote
-                                </a>
-                            <?php else: ?>
-                                <span class="text-gray-500 italic text-sm whitespace-nowrap">
-                                    <?php echo htmlspecialchars($display_message); // Display the reason why voting isn't possible ?>
-                                </span>
-                            <?php endif; ?>
+                            <?php echo $action_button; // Display the generated button or message ?>
                         </div>
                     </div>
                 <?php endforeach; ?>
