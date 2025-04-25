@@ -4,11 +4,16 @@ session_start();
 
 // --- Authentication Check ---
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'Voter') {
-    // Should not happen if vote.php is working, but good practice
     $_SESSION['login_message'] = "Authentication required to vote.";
     header("Location: ../login.php");
     exit();
 }
+
+// *** Define the application's timezone ***
+// This should match the timezone set in dashboard.php and vote.php
+$app_timezone_str = 'Asia/Kathmandu'; // Use your server/application timezone
+date_default_timezone_set($app_timezone_str);
+
 
 // Include the database connection file
 require_once 'db_connect.php'; // Adjust path if necessary
@@ -18,24 +23,23 @@ $user_id = $_SESSION['user_id'];
 
 // --- Check Request Method ---
 if ($_SERVER["REQUEST_METHOD"] !== "POST") {
-    // Redirect if accessed directly or via GET
     header("Location: ../dashboard.php");
     exit();
 }
 
 // --- Retrieve POST Data ---
 $election_id = isset($_POST['election_id']) ? (int)$_POST['election_id'] : 0;
-$vote_data_raw = isset($_POST['vote_data']) ? $_POST['vote_data'] : null; // Can be string (FPTP) or array (others)
-$submitted_voting_method = isset($_POST['voting_method']) ? $_POST['voting_method'] : ''; // Get method submitted by form
+$vote_data_raw = isset($_POST['vote_data']) ? $_POST['vote_data'] : null;
+$submitted_voting_method = isset($_POST['voting_method']) ? $_POST['voting_method'] : '';
 
 // --- Basic Input Validation ---
-if ($election_id <= 0 || $vote_data_raw === null) {
-    $_SESSION['vote_message'] = "Invalid submission data.";
+if ($election_id <= 0) { // Allow null/empty vote_data for Approval/Ranked/Score
+    $_SESSION['vote_message'] = "Invalid submission data (Missing Election ID).";
     $_SESSION['vote_status'] = "error";
-    // Redirect back to the specific voting page if possible, otherwise dashboard
-    header("Location: " . ($election_id > 0 ? "../vote.php?election_id=" . $election_id : "../dashboard.php"));
+    header("Location: ../dashboard.php"); // Redirect to dashboard if election ID is missing
     exit();
 }
+
 
 // --- Database Transaction and Verification ---
 $conn->begin_transaction(); // Start transaction
@@ -45,6 +49,11 @@ $election = null;
 $candidates_map = []; // Store valid candidate IDs for validation: [id => true]
 
 try {
+    // Get current time as a DateTime object in the application's timezone
+    // Moved inside try block to ensure timezone object is available
+    $app_timezone = new DateTimeZone($app_timezone_str);
+    $now_dt = new DateTime('now', $app_timezone);
+
     // 1. Re-verify Election Status, Dates, Eligibility, and Voting Status (within transaction)
     // Use SELECT ... FOR UPDATE on EligibleVoters to lock the row and prevent race conditions
     $sql_verify = "SELECT
@@ -53,7 +62,7 @@ try {
                    FROM Elections e
                    JOIN EligibleVoters ev ON e.ElectionID = ev.ElectionID
                    WHERE e.ElectionID = ? AND ev.UserID = ?
-                   FOR UPDATE"; // Lock the EligibleVoters row for this user/election
+                   FOR UPDATE"; // Lock the EligibleVoters row
 
     $stmt_verify = $conn->prepare($sql_verify);
     if (!$stmt_verify) throw new Exception("Database prepare error (verify): " . $conn->error);
@@ -69,13 +78,26 @@ try {
     $election = $result_verify->fetch_assoc();
     $stmt_verify->close(); // Close statement early
 
-    // Check status, dates, and if already voted
-    $now = date('Y-m-d H:i:s');
+    // Convert DB date strings into DateTime objects using the application's timezone
+    $start_dt = null;
+    $end_dt = null;
+    if ($election['StartDate']) {
+        $start_dt = new DateTime($election['StartDate'], $app_timezone);
+    }
+    if ($election['EndDate']) {
+        $end_dt = new DateTime($election['EndDate'], $app_timezone);
+    }
+
+    // Check status, dates, and if already voted using DateTime objects
+    if (!$start_dt || !$end_dt) throw new Exception("Invalid date configuration for the election.");
     if ($election['ElectionStatus'] !== 'Active') throw new Exception("Election is not active.");
-    if ($now < $election['StartDate']) throw new Exception("Voting has not started yet.");
-    if ($now > $election['EndDate']) throw new Exception("Voting has ended.");
+    // *** Use DateTime object comparison ***
+    if ($now_dt < $start_dt) throw new Exception("Voting has not started yet.");
+    // *** Use DateTime object comparison ***
+    if ($now_dt > $end_dt) throw new Exception("Voting has ended.");
     if ($election['HasVoted']) throw new Exception("You have already submitted your vote for this election.");
     if ($election['VotingMethod'] !== $submitted_voting_method) throw new Exception("Voting method mismatch."); // Sanity check
+
 
     // 2. Fetch valid Candidate IDs for this election (for validation)
     $sql_candidates = "SELECT CandidateID FROM Candidates WHERE ElectionID = ?";
@@ -97,8 +119,8 @@ try {
 
     switch ($election['VotingMethod']) {
         case 'FPTP':
-            if (is_numeric($vote_data_raw) && isset($candidates_map[(int)$vote_data_raw])) {
-                $vote_data_processed = (int)$vote_data_raw; // Store the single candidate ID
+            if ($vote_data_raw !== null && is_numeric($vote_data_raw) && isset($candidates_map[(int)$vote_data_raw])) {
+                $vote_data_processed = (int)$vote_data_raw; // Store the single candidate ID as string/number
                 $validation_passed = true;
             } else {
                  throw new Exception("Invalid selection for FPTP voting.");
@@ -106,25 +128,24 @@ try {
             break;
 
         case 'Approval':
-            if (is_array($vote_data_raw)) {
-                $approved_ids = [];
-                foreach ($vote_data_raw as $cand_id) {
-                    if (is_numeric($cand_id) && isset($candidates_map[(int)$cand_id])) {
-                        $approved_ids[] = (int)$cand_id; // Add valid IDs
-                    } else {
-                         throw new Exception("Invalid candidate ID submitted for Approval voting.");
-                    }
-                }
-                // Allow empty approval array (voting for no one)
-                $vote_data_processed = json_encode($approved_ids); // Store as JSON array
-                $validation_passed = true;
-            } else if ($vote_data_raw === null) { // Handle case where no boxes were checked
-                 $vote_data_processed = json_encode([]); // Store empty array
+             $approved_ids = []; // Initialize empty array
+             if (is_array($vote_data_raw)) { // If checkboxes were submitted (even if none checked, $_POST['vote_data'] might exist as empty array)
+                 foreach ($vote_data_raw as $cand_id) {
+                     if (is_numeric($cand_id) && isset($candidates_map[(int)$cand_id])) {
+                         $approved_ids[] = (int)$cand_id; // Add valid IDs
+                     } else {
+                          throw new Exception("Invalid candidate ID submitted for Approval voting.");
+                     }
+                 }
+                 $vote_data_processed = json_encode($approved_ids); // Store as JSON array (can be empty [])
                  $validation_passed = true;
-            } else {
-                 throw new Exception("Invalid data format for Approval voting.");
-            }
-            break;
+             } else if ($vote_data_raw === null) { // Explicitly handle case where the 'vote_data' key isn't sent at all (no boxes checked)
+                  $vote_data_processed = json_encode([]); // Store empty array
+                  $validation_passed = true;
+             } else {
+                  throw new Exception("Invalid data format for Approval voting.");
+             }
+             break;
 
         case 'RCV':
         case 'STV':
@@ -134,30 +155,19 @@ try {
                 $used_ranks = [];
                 $max_rank = count($candidates_map);
                 foreach ($vote_data_raw as $cand_id_str => $rank_str) {
-                    // Skip empty ranks
-                    if (trim($rank_str) === '') continue;
+                    if (trim($rank_str) === '') continue; // Skip empty ranks
 
                     $cand_id = filter_var($cand_id_str, FILTER_VALIDATE_INT);
                     $rank = filter_var($rank_str, FILTER_VALIDATE_INT);
 
-                    // Check if candidate ID is valid for this election
-                    if ($cand_id === false || !isset($candidates_map[$cand_id])) {
-                        throw new Exception("Invalid candidate ID ($cand_id_str) submitted for ranking.");
-                    }
-                    // Check if rank is a valid number within range
-                    if ($rank === false || $rank < 1 || $rank > $max_rank) {
-                        throw new Exception("Invalid rank ($rank_str) submitted. Must be between 1 and $max_rank.");
-                    }
-                    // Check if rank is unique
-                    if (isset($used_ranks[$rank])) {
-                         throw new Exception("Duplicate rank ($rank) submitted. Ranks must be unique.");
-                    }
+                    if ($cand_id === false || !isset($candidates_map[$cand_id])) throw new Exception("Invalid candidate ID ($cand_id_str) submitted for ranking.");
+                    if ($rank === false || $rank < 1 || $rank > $max_rank) throw new Exception("Invalid rank ($rank_str) submitted. Must be between 1 and $max_rank.");
+                    if (isset($used_ranks[$rank])) throw new Exception("Duplicate rank ($rank) submitted. Ranks must be unique.");
 
-                    $ranked_votes[$cand_id] = $rank; // Store valid rank
+                    $ranked_votes[$cand_id] = $rank;
                     $used_ranks[$rank] = true;
                 }
-                 // Allow empty ranking (voting for no one ranked)
-                $vote_data_processed = json_encode($ranked_votes); // Store as JSON object {cand_id: rank, ...}
+                $vote_data_processed = json_encode($ranked_votes);
                 $validation_passed = true;
             } else {
                  throw new Exception("Invalid data format for ranked voting.");
@@ -167,27 +177,19 @@ try {
          case 'Score':
              if (is_array($vote_data_raw)) {
                  $scored_votes = [];
-                 $min_score = 0; // Define score range
-                 $max_score = 10;
+                 $min_score = 0; $max_score = 10; // Define score range
                  foreach ($vote_data_raw as $cand_id_str => $score_str) {
-                     // Skip empty scores
-                     if (trim($score_str) === '') continue;
+                     if (trim($score_str) === '') continue; // Skip empty scores
 
                      $cand_id = filter_var($cand_id_str, FILTER_VALIDATE_INT);
-                     $score = filter_var($score_str, FILTER_VALIDATE_INT); // Scores are usually integers
+                     $score = filter_var($score_str, FILTER_VALIDATE_INT);
 
-                     // Check if candidate ID is valid
-                     if ($cand_id === false || !isset($candidates_map[$cand_id])) {
-                         throw new Exception("Invalid candidate ID ($cand_id_str) submitted for scoring.");
-                     }
-                     // Check if score is valid number within range
-                     if ($score === false || $score < $min_score || $score > $max_score) {
-                         throw new Exception("Invalid score ($score_str) submitted. Must be between $min_score and $max_score.");
-                     }
-                     $scored_votes[$cand_id] = $score; // Store valid score
+                     if ($cand_id === false || !isset($candidates_map[$cand_id])) throw new Exception("Invalid candidate ID ($cand_id_str) submitted for scoring.");
+                     if ($score === false || $score < $min_score || $score > $max_score) throw new Exception("Invalid score ($score_str) submitted. Must be between $min_score and $max_score.");
+
+                     $scored_votes[$cand_id] = $score;
                  }
-                 // Allow empty scoring (giving no scores)
-                 $vote_data_processed = json_encode($scored_votes); // Store as JSON object {cand_id: score, ...}
+                 $vote_data_processed = json_encode($scored_votes);
                  $validation_passed = true;
              } else {
                   throw new Exception("Invalid data format for score voting.");
@@ -198,8 +200,9 @@ try {
             throw new Exception("Unsupported voting method encountered during submission.");
     }
 
+    // Ensure vote_data is set (even if empty JSON array/object for some methods)
     if (!$validation_passed || $vote_data_processed === null) {
-         throw new Exception("Vote data validation failed.");
+         throw new Exception("Vote data validation failed or processing error.");
     }
 
     // 4. Generate Confirmation Code
@@ -210,6 +213,7 @@ try {
     $stmt_insert = $conn->prepare($sql_insert_vote);
     if (!$stmt_insert) throw new Exception("Database prepare error (insert vote): " . $conn->error);
 
+    // VoteData is always stored as TEXT (string or JSON string)
     $stmt_insert->bind_param("iiss", $election_id, $user_id, $vote_data_processed, $confirmation_code);
     if (!$stmt_insert->execute()) throw new Exception("Database error inserting vote: " . $stmt_insert->error);
     $stmt_insert->close();
@@ -222,9 +226,7 @@ try {
     $stmt_update->bind_param("ii", $election_id, $user_id);
     if (!$stmt_update->execute()) throw new Exception("Database error updating voting status: " . $stmt_update->error);
 
-    // Check if the update was successful (optional but good)
     if ($stmt_update->affected_rows !== 1) {
-        // This shouldn't happen if the initial SELECT FOR UPDATE worked, but as a safeguard:
         throw new Exception("Failed to update voting status. Vote may not have been fully recorded.");
     }
     $stmt_update->close();
@@ -243,6 +245,7 @@ try {
     $conn->rollback(); // Rollback transaction on any error
 
     $error_message = $e->getMessage(); // Get the specific error message
+    error_log("Vote submission error for UserID $user_id, ElectionID $election_id: $error_message"); // Log the error
 
     // Set session message to display on the voting page
     $_SESSION['vote_message'] = "Error submitting vote: " . $error_message;
@@ -253,7 +256,7 @@ try {
     exit();
 
 } finally {
-    // Ensure connection is closed even if exceptions occurred (though rollback handles most)
+    // Ensure connection is closed
      if (isset($conn) && $conn instanceof mysqli && $conn->thread_id) {
        $conn->close();
      }
