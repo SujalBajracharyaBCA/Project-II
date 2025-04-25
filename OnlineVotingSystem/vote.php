@@ -1,14 +1,17 @@
 <?php
-// Start the session to access logged-in user data
+// vote.php
 session_start();
 
 // --- Authentication Check ---
-// Check if user is logged in and is a Voter
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'Voter') {
     $_SESSION['login_message'] = "Please log in to vote.";
     header("Location: login.php");
     exit();
 }
+
+// *** Define the application's timezone ***
+$app_timezone_str = 'Asia/Kathmandu'; // Use your server/application timezone
+date_default_timezone_set($app_timezone_str);
 
 // Include the database connection file
 require_once 'includes/db_connect.php';
@@ -19,9 +22,7 @@ $username = $_SESSION['username'];
 
 // --- Get Election ID from URL ---
 if (!isset($_GET['election_id']) || !filter_var($_GET['election_id'], FILTER_VALIDATE_INT)) {
-    // Invalid or missing election ID
-    // Redirect to dashboard or show error
-    $_SESSION['dashboard_message'] = "Invalid election specified."; // Create a session message for dashboard
+    $_SESSION['dashboard_message'] = "Invalid election specified.";
     $_SESSION['dashboard_status'] = "error";
     header("Location: dashboard.php");
     exit();
@@ -35,8 +36,14 @@ $error_message = null;
 $can_vote = false;
 $voting_method = '';
 
-// Get current time
-$now = date('Y-m-d H:i:s');
+// Get current time as a DateTime object in the application's timezone
+try {
+    $app_timezone = new DateTimeZone($app_timezone_str);
+    $now_dt = new DateTime('now', $app_timezone);
+} catch (Exception $e) {
+    error_log("Error creating DateTime objects in vote.php: " . $e->getMessage());
+    die("An error occurred processing time information. Please contact support.");
+}
 
 // Prepare SQL to get election details and check eligibility/voting status
 $sql_check = "SELECT
@@ -57,12 +64,30 @@ if ($stmt_check) {
         $election = $result_check->fetch_assoc();
         $voting_method = $election['VotingMethod']; // Get the voting method
 
-        // --- Validate Election Status and Voting Eligibility ---
-        if ($election['ElectionStatus'] !== 'Active') {
+        // Convert DB date strings into DateTime objects using the application's timezone
+        $start_dt = null;
+        $end_dt = null;
+        try {
+            if ($election['StartDate']) {
+                $start_dt = new DateTime($election['StartDate'], $app_timezone);
+            }
+            if ($election['EndDate']) {
+                $end_dt = new DateTime($election['EndDate'], $app_timezone);
+            }
+        } catch (Exception $e) {
+             error_log("Error parsing date for Election ID " . $election_id . " in vote.php: " . $e->getMessage());
+             // Dates remain null if parsing fails
+        }
+
+
+        // --- Validate Election Status and Voting Eligibility using DateTime objects ---
+        if (!$start_dt || !$end_dt) {
+            $error_message = "Invalid date configuration for this election.";
+        } elseif ($election['ElectionStatus'] !== 'Active') {
             $error_message = "This election is not currently active.";
-        } elseif ($now < $election['StartDate']) {
+        } elseif ($now_dt < $start_dt) { // *** Use DateTime object comparison ***
             $error_message = "Voting for this election has not started yet.";
-        } elseif ($now > $election['EndDate']) {
+        } elseif ($now_dt > $end_dt) { // *** Use DateTime object comparison ***
             $error_message = "Voting for this election has ended.";
         } elseif ($election['HasVoted']) {
             $error_message = "You have already voted in this election.";
@@ -89,7 +114,7 @@ if ($stmt_check) {
             } else {
                 $error_message = "Could not retrieve candidate information.";
                 $can_vote = false;
-                // Log error: error_log("Prepare failed (fetch candidates): " . $conn->error);
+                error_log("Prepare failed (fetch candidates): " . $conn->error);
             }
         }
     } else {
@@ -100,14 +125,14 @@ if ($stmt_check) {
 } else {
     // Handle prepare statement error
     $error_message = "Could not verify election eligibility. Please try again later.";
-    // Log error: error_log("Prepare failed (check eligibility): " . $conn->error);
+    error_log("Prepare failed (check eligibility): " . $conn->error);
 }
 
 // Close DB connection only after all queries are done
 $conn->close();
 
 // If there was an error preventing voting, redirect back to dashboard with message
-if (!$can_vote && $error_message) {
+if (!$can_vote && isset($error_message)) { // Check if error_message is set
      $_SESSION['dashboard_message'] = $error_message;
      $_SESSION['dashboard_status'] = "error";
      header("Location: dashboard.php");
@@ -118,6 +143,8 @@ if (!$can_vote && $error_message) {
     header("Location: dashboard.php");
     exit();
 }
+
+// If we reach here, $can_vote is true and $election data is available
 
 ?>
 <!DOCTYPE html>
@@ -140,10 +167,12 @@ if (!$can_vote && $error_message) {
             display: flex;
             align-items: center;
         }
-        .candidate-item input {
+        .candidate-item input[type="radio"],
+        .candidate-item input[type="checkbox"] {
             margin-right: 1rem; /* mr-4 */
             height: 1.25rem; /* h-5 */
             width: 1.25rem; /* w-5 */
+            flex-shrink: 0; /* Prevent shrinking */
         }
         .candidate-details {
             flex-grow: 1;
@@ -157,14 +186,15 @@ if (!$can_vote && $error_message) {
             color: #6b7280; /* gray-500 */
             margin-top: 0.25rem; /* mt-1 */
         }
-        /* Styles for Ranked Choice (if implemented) */
+        /* Styles for Ranked Choice / Score */
         .rank-input {
-            width: 3rem; /* w-12 */
+            width: 4rem; /* w-16 */
             text-align: center;
             margin-right: 1rem;
-            border: 1px solid #ccc;
-            padding: 0.25rem;
-            border-radius: 0.25rem;
+            border: 1px solid #d1d5db; /* gray-300 */
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.375rem; /* rounded-md */
+            flex-shrink: 0;
         }
         .validation-error { color: red; font-size: 0.875rem; margin-top: 0.25rem; }
 
@@ -192,7 +222,7 @@ if (!$can_vote && $error_message) {
         <div class="bg-white p-8 rounded-lg shadow-lg border border-gray-200 max-w-3xl mx-auto">
             <h2 class="text-3xl font-bold text-center text-indigo-700 mb-2"><?php echo htmlspecialchars($election['Title']); ?></h2>
             <p class="text-center text-gray-600 mb-6"><?php echo htmlspecialchars($election['Description'] ?? ''); ?></p>
-            <p class="text-center text-sm text-red-600 mb-6">Voting ends: <?php echo date('M j, Y g:i A', strtotime($election['EndDate'])); ?></p>
+            <p class="text-center text-sm text-red-600 mb-6">Voting ends: <?php echo ($end_dt) ? $end_dt->format('M j, Y g:i A') : 'N/A'; ?></p>
 
             <hr class="my-6">
 
@@ -209,13 +239,13 @@ if (!$can_vote && $error_message) {
                         break;
                     case 'RCV':
                     case 'STV':
-                        echo "Please rank the candidates in order of preference (1 for highest). Use unique numbers.";
+                        echo "Please rank the candidates in order of preference (1 for highest). Use unique numbers. You do not have to rank all candidates.";
                         break;
                     case 'Score':
-                         echo "Please assign a score to each candidate (e.g., 0-10, higher is better).";
+                         echo "Please assign a score to each candidate (e.g., 0-10, higher is better). You do not have to score all candidates.";
                          break;
                     case 'Condorcet':
-                         echo "Please rank the candidates in order of preference (1 for highest)."; // Often uses ranking
+                         echo "Please rank the candidates in order of preference (1 for highest). Use unique numbers. You do not have to rank all candidates.";
                          break;
                     default:
                         echo "Please make your selection(s).";
@@ -224,7 +254,7 @@ if (!$can_vote && $error_message) {
             </p>
 
             <?php
-            // Display potential errors from submission handler
+            // Display potential errors from submission handler (handle_vote.php)
             if (isset($_SESSION['vote_message'])) {
                 $v_message = $_SESSION['vote_message'];
                 $v_status = $_SESSION['vote_status'] ?? 'error';
@@ -252,19 +282,16 @@ if (!$can_vote && $error_message) {
                                     break;
 
                                 case 'Approval': // Approval Voting: Checkboxes
-                                    // Name uses array syntax `vote_data[]`
                                     echo '<input type="checkbox" id="candidate_' . $candidate['CandidateID'] . '" name="vote_data[]" value="' . $candidate['CandidateID'] . '">';
                                     break;
 
-                                case 'RCV': // Ranked Choice Voting: Number inputs (simple version)
+                                case 'RCV': // Ranked Choice Voting: Number inputs
                                 case 'STV':
                                 case 'Condorcet': // Often uses ranking
-                                    // Name uses array syntax `vote_data[candidate_id]`
-                                    echo '<input type="number" min="1" max="' . count($candidates) . '" id="candidate_' . $candidate['CandidateID'] . '" name="vote_data[' . $candidate['CandidateID'] . ']" class="rank-input">';
+                                    echo '<input type="number" min="1" max="' . count($candidates) . '" id="candidate_' . $candidate['CandidateID'] . '" name="vote_data[' . $candidate['CandidateID'] . ']" class="rank-input" placeholder="Rank">';
                                     break;
 
                                 case 'Score': // Score Voting: Number inputs (e.g., 0-10)
-                                     // Name uses array syntax `vote_data[candidate_id]`
                                      echo '<input type="number" min="0" max="10" id="candidate_' . $candidate['CandidateID'] . '" name="vote_data[' . $candidate['CandidateID'] . ']" class="rank-input" placeholder="0-10">';
                                      break;
 
@@ -334,26 +361,23 @@ if (!$can_vote && $error_message) {
                         isValid = false;
                     }
                     */
-                    // Often, approving zero candidates is allowed, so validation might not be needed here.
+                    // Approving zero candidates is usually allowed.
                     break;
 
                 case 'RCV':
                 case 'STV':
                 case 'Condorcet':
-                    // Validate ranking inputs (ensure numbers, check for duplicates, check range)
+                    // Validate ranking inputs
                     const rankInputs = form.querySelectorAll('input[name^="vote_data["]');
                     const ranks = new Set();
-                    let hasEmpty = false;
+                    const rankValues = []; // Store entered ranks
                     let hasDuplicate = false;
                     let outOfRange = false;
                     const maxRank = rankInputs.length;
 
                     rankInputs.forEach(input => {
                         const rankValue = input.value.trim();
-                        if (rankValue === '') {
-                            // Allow empty ranks (partial ranking) - depends on rules
-                            // If empty ranks are NOT allowed, set hasEmpty = true;
-                        } else {
+                        if (rankValue !== '') { // Only process non-empty inputs
                             const rankNum = parseInt(rankValue, 10);
                             if (isNaN(rankNum) || rankNum < 1 || rankNum > maxRank) {
                                 outOfRange = true;
@@ -361,16 +385,14 @@ if (!$can_vote && $error_message) {
                                 hasDuplicate = true;
                             } else {
                                 ranks.add(rankNum);
+                                rankValues.push(rankNum);
                             }
                         }
                     });
 
-                    // Example: Require ranking at least one candidate
-                    if (ranks.size === 0 && !hasEmpty) { // Adjust if empty ranks are disallowed
-                         // errorDiv.textContent = 'Please rank at least one candidate.';
-                         // isValid = false;
-                         // Often allowed, so commented out
-                    }
+                    // Check if ranks are sequential if needed (e.g., 1, 2, 3 not 1, 3, 5) - depends on rules
+                    // For simplicity, we only check for duplicates and range here.
+
                     if (outOfRange) {
                         errorDiv.textContent = `Ranks must be numbers between 1 and ${maxRank}.`;
                         isValid = false;
@@ -379,11 +401,10 @@ if (!$can_vote && $error_message) {
                         errorDiv.textContent = 'Please use unique ranks for each candidate you rank.';
                         isValid = false;
                     }
-                    // Add check for hasEmpty if empty ranks are disallowed
                     break;
 
                 case 'Score':
-                     // Validate score inputs (ensure numbers, check range)
+                     // Validate score inputs
                      const scoreInputs = form.querySelectorAll('input[name^="vote_data["]');
                      let scoreOutOfRange = false;
                      scoreInputs.forEach(input => {
@@ -408,7 +429,12 @@ if (!$can_vote && $error_message) {
 
             // Confirmation dialog before submitting
             if (isValid) {
-                return confirm('Are you sure you want to submit your vote? This action cannot be undone.');
+                // Customize confirmation message based on method? (Optional)
+                let confirmMsg = 'Are you sure you want to submit your vote? This action cannot be undone.';
+                // if (votingMethod === 'Approval' && form.querySelectorAll('input[name="vote_data[]"]:checked').length === 0) {
+                //    confirmMsg = 'You have not approved any candidates. Are you sure you want to submit an empty ballot?';
+                // }
+                return confirm(confirmMsg);
             }
 
             return isValid; // Prevent submission if validation failed
