@@ -2,6 +2,10 @@
 // admin/election_management.php
 session_start();
 
+// *** Set the default timezone for PHP ***
+// Ensure this matches your server and database timezone expectations
+date_default_timezone_set('Asia/Kathmandu'); // Set to Nepal Time
+
 // --- Authentication and Authorization Check ---
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'Admin') {
     $_SESSION['login_message'] = "You must be logged in as an administrator to access this page.";
@@ -17,15 +21,36 @@ require_once 'includes/db_connect.php';
 $admin_id = $_SESSION['user_id'];
 $admin_username = $_SESSION['username'];
 
+// --- Generate CSRF token if not already set ---
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
+
+
+// --- Handle Session Messages ---
+$success_message = null;
+$error_message = null;
+if (isset($_SESSION['message'])) {
+    if ($_SESSION['message_status'] === 'success') {
+        $success_message = $_SESSION['message'];
+    } else {
+        $error_message = $_SESSION['message'];
+    }
+    unset($_SESSION['message']);
+    unset($_SESSION['message_status']);
+}
+
+
 // --- Fetch Election Data ---
 $elections = [];
-$error_message = null;
+$fetch_error = null; // Use a different variable for fetch errors
 
-// Get current time for status determination (though DB status should be primary)
-$now = date('Y-m-d H:i:s');
+// Get current time using the explicitly set timezone
+$now_dt = new DateTime(); // Will use 'Asia/Kathmandu'
+$now_str = $now_dt->format('Y-m-d H:i:s');
 
-// SQL to fetch all elections, potentially joining with user who created it
-// Order by creation date or start date, newest first
+// SQL to fetch all elections
 $sql = "SELECT
             e.ElectionID,
             e.Title,
@@ -35,38 +60,67 @@ $sql = "SELECT
             e.Status,
             u.Username AS CreatedByAdmin
         FROM Elections e
-        LEFT JOIN Users u ON e.CreatedByAdminID = u.UserID AND u.Role = 'Admin'
-        ORDER BY e.CreatedAt DESC"; // Or ORDER BY e.StartDate DESC
+        LEFT JOIN Users u ON e.CreatedByAdminID = u.UserID -- Assuming Users table exists
+        ORDER BY e.StartDate DESC, e.CreatedAt DESC"; // Order by start date, then creation
 
 $result = $conn->query($sql);
 
 if ($result) {
     while ($row = $result->fetch_assoc()) {
+        // Parse dates into DateTime objects for reliable comparison
+        // DateTime constructor uses the default timezone set above unless specified otherwise
+        try {
+             // It's safer to specify the timezone if you know the DB stores UTC or another specific zone
+             // Example if DB stores UTC:
+             // $row['StartDateDT'] = new DateTime($row['StartDate'], new DateTimeZone('UTC'));
+             // $row['EndDateDT'] = new DateTime($row['EndDate'], new DateTimeZone('UTC'));
+             // $row['StartDateDT']->setTimezone(new DateTimeZone('Asia/Kathmandu')); // Convert to local for display/comparison logic
+             // $row['EndDateDT']->setTimezone(new DateTimeZone('Asia/Kathmandu'));
+
+             // Assuming DB stores dates in the intended local timezone (or PHP's default is correctly set)
+            $row['StartDateDT'] = new DateTime($row['StartDate']);
+            $row['EndDateDT'] = new DateTime($row['EndDate']);
+        } catch (Exception $e) {
+             // Handle potential date parsing errors
+             error_log("Error parsing date for Election ID " . $row['ElectionID'] . ": " . $e->getMessage());
+             // Assign default or null values to prevent errors later
+             $row['StartDateDT'] = null;
+             $row['EndDateDT'] = null;
+        }
         $elections[] = $row;
     }
 } else {
-    $error_message = "Error fetching elections: " . $conn->error;
-    error_log($error_message); // Log the detailed error
+    $fetch_error = "Error fetching elections: " . $conn->error;
+    error_log($fetch_error); // Log the detailed error
 }
 
-// Function to determine display status and color (can be moved to helpers)
-function get_status_info($status, $start_date, $end_date) {
-    global $now; // Use the global current time variable
+// Function to determine display status and color
+// Ensure DateTime objects are passed if available
+function get_status_info($status, $start_date_dt, $end_date_dt, $now_dt) {
     $display_status = $status;
     $color_class = 'bg-gray-500'; // Default: Pending/Archived
 
-    // Refine status based on dates if needed (DB status should ideally be accurate)
-    if ($status === 'Pending' && $start_date > $now) {
+    // Check if dates are valid DateTime objects before comparing
+    if (!$start_date_dt || !$end_date_dt) {
+         $display_status = 'Error (Date Invalid)';
+         $color_class = 'bg-black';
+         return ['text' => $display_status, 'color' => $color_class];
+    }
+
+
+    if ($status === 'Pending' && $start_date_dt > $now_dt) {
         $display_status = 'Upcoming';
         $color_class = 'bg-yellow-500';
-    } elseif ($status === 'Active' && $start_date <= $now && $end_date >= $now) {
+    } elseif ($status === 'Pending' && $start_date_dt <= $now_dt) {
+        $display_status = 'Ready to Activate'; // Indicate it can be activated
+        $color_class = 'bg-blue-500';
+    } elseif ($status === 'Active' && $end_date_dt >= $now_dt) {
         $display_status = 'Active';
         $color_class = 'bg-green-500';
-    } elseif ($status === 'Active' && $end_date < $now) {
-        // If DB status is Active but end date passed, show as Closed
-        $display_status = 'Closed (Ended)';
-        $color_class = 'bg-red-500';
-        // Ideally, a background job would update Status to 'Closed' in DB
+    } elseif ($status === 'Active' && $end_date_dt < $now_dt) {
+        // DB status is Active but end date passed
+        $display_status = 'Ended (Needs Closing)';
+        $color_class = 'bg-orange-500'; // Indicate action needed
     } elseif ($status === 'Closed') {
         $display_status = 'Closed';
         $color_class = 'bg-red-500';
@@ -78,8 +132,7 @@ function get_status_info($status, $start_date, $end_date) {
     return ['text' => $display_status, 'color' => $color_class];
 }
 
-// Close the connection if done with DB operations for this page load
-// $conn->close(); // Keep open if needed later on the page
+$conn->close(); // Close connection after fetching
 
 ?>
 <!DOCTYPE html>
@@ -95,24 +148,15 @@ function get_status_info($status, $start_date, $end_date) {
         /* Sidebar and responsive styles from dashboard */
         .sidebar { width: 250px; transition: transform 0.3s ease-in-out; }
         .content { margin-left: 250px; transition: margin-left 0.3s ease-in-out; }
-        .sidebar-collapsed { transform: translateX(-100%); }
-        .content-expanded { margin-left: 0; }
-         @media (max-width: 768px) {
-            .sidebar { transform: translateX(-100%); }
-            .sidebar.open { transform: translateX(0); z-index: 40; }
-            .content { margin-left: 0; }
-            .sidebar-toggle { display: block; }
-            .overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.5); z-index: 30; }
-            .sidebar.open + .overlay { display: block; }
-        }
-        @media (min-width: 769px) {
-             .sidebar-toggle-close, .sidebar-toggle-open { display: none; }
-        }
+        @media (max-width: 768px) { .sidebar { transform: translateX(-100%); } .sidebar.open { transform: translateX(0); z-index: 40; } .content { margin-left: 0; } .sidebar-toggle { display: block; } .overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.5); z-index: 30; } .sidebar.open + .overlay { display: block; } }
+        @media (min-width: 769px) { .sidebar-toggle-close, .sidebar-toggle-open { display: none; } }
         /* Table specific styles */
-        th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #e2e8f0; /* gray-200 */ }
-        th { background-color: #f8fafc; /* gray-50 */ font-weight: 600; /* font-semibold */ color: #4b5563; /* gray-600 */ }
-        tbody tr:hover { background-color: #f9fafb; /* gray-50 */ }
-        .action-btn { padding: 0.3rem 0.6rem; font-size: 0.8rem; margin-right: 0.25rem; border-radius: 0.375rem; /* rounded-md */ transition: background-color 0.2s; }
+        th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #e2e8f0; vertical-align: top; /* Align top for actions */ }
+        th { background-color: #f8fafc; font-weight: 600; color: #4b5563; }
+        tbody tr:hover { background-color: #f9fafb; }
+        .action-btn { padding: 0.3rem 0.6rem; font-size: 0.8rem; margin-right: 0.25rem; margin-bottom: 0.25rem; border-radius: 0.375rem; transition: background-color 0.2s; display: inline-flex; align-items: center; text-decoration: none; color: white; border: none; cursor: pointer; }
+        .actions-cell form { display: inline-block; margin: 0; padding: 0; } /* Style forms for actions */
+        .status-badge { padding: 0.2rem 0.5rem; font-size: 0.75rem; font-weight: 600; border-radius: 9999px; display: inline-block; text-align: center; }
     </style>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
@@ -126,33 +170,15 @@ function get_status_info($status, $start_date, $end_date) {
                 <button class="sidebar-toggle-close md:hidden text-white focus:outline-none"><i class="fas fa-times text-xl"></i></button>
             </div>
             <nav>
-                <a href="dashboard.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">
-                    <i class="fas fa-tachometer-alt mr-2 w-5 text-center"></i>Dashboard
-                </a>
-                <a href="election_management.php" class="block py-2.5 px-4 rounded transition duration-200 bg-indigo-600 font-semibold">
-                    <i class="fas fa-poll-h mr-2 w-5 text-center"></i>Elections
-                </a>
-                <a href="candidate_management.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">
-                    <i class="fas fa-users mr-2 w-5 text-center"></i>Candidates
-                </a>
-                <a href="voter_management.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">
-                    <i class="fas fa-user-check mr-2 w-5 text-center"></i>Voters
-                </a>
-                 <a href="results.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">
-                    <i class="fas fa-chart-bar mr-2 w-5 text-center"></i>Results
-                </a>
-                <a href="user_management.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">
-                    <i class="fas fa-user-cog mr-2 w-5 text-center"></i>Admin Users
-                </a>
-                <a href="audit_logs.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">
-                    <i class="fas fa-history mr-2 w-5 text-center"></i>Audit Logs
-                </a>
-                <a href="settings.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">
-                    <i class="fas fa-sliders-h mr-2 w-5 text-center"></i>Settings
-                </a>
-                <a href="includes/logout.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-red-600 mt-8 text-red-300 hover:text-white">
-                    <i class="fas fa-sign-out-alt mr-2 w-5 text-center"></i>Logout
-                </a>
+                <a href="dashboard.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700"><i class="fas fa-tachometer-alt mr-2 w-5 text-center"></i>Dashboard</a>
+                <a href="election_management.php" class="block py-2.5 px-4 rounded transition duration-200 bg-indigo-600 font-semibold"><i class="fas fa-poll-h mr-2 w-5 text-center"></i>Elections</a>
+                 <a href="voting_monitor.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700"><i class="fas fa-tv mr-2 w-5 text-center"></i>Voting Monitor</a>
+                <a href="voter_management.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700"><i class="fas fa-user-check mr-2 w-5 text-center"></i>Voters</a>
+                 <a href="results.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700"><i class="fas fa-chart-bar mr-2 w-5 text-center"></i>Results</a>
+                 <a href="user_management.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700"><i class="fas fa-user-cog mr-2 w-5 text-center"></i>Admin Users</a>
+                 <a href="audit_logs.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700"><i class="fas fa-history mr-2 w-5 text-center"></i>Audit Logs</a>
+                 <a href="settings.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700"><i class="fas fa-sliders-h mr-2 w-5 text-center"></i>Settings</a>
+                 <a href="includes/logout.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-red-600 mt-8 text-red-300 hover:text-white"><i class="fas fa-sign-out-alt mr-2 w-5 text-center"></i>Logout</a>
             </nav>
         </aside>
 
@@ -173,23 +199,22 @@ function get_status_info($status, $start_date, $end_date) {
                     </a>
                 </div>
 
-                <?php
-                if (isset($_SESSION['message'])) {
-                    $message = $_SESSION['message'];
-                    $status = $_SESSION['message_status'] ?? 'info'; // Default to info
-                    $bgColor = ($status === 'success') ? 'bg-green-100 border-green-400 text-green-700' : (($status === 'error') ? 'bg-red-100 border-red-400 text-red-700' : 'bg-blue-100 border-blue-400 text-blue-700');
-                    echo "<div class='border px-4 py-3 rounded relative mb-4 {$bgColor}' role='alert'>";
-                    echo "<span class='block sm:inline'>" . htmlspecialchars($message) . "</span>";
-                    echo "</div>";
-                    unset($_SESSION['message']);
-                    unset($_SESSION['message_status']);
-                }
-                if ($error_message) {
-                     echo "<div class='border px-4 py-3 rounded relative mb-4 bg-red-100 border-red-400 text-red-700' role='alert'>";
-                     echo "<span class='block sm:inline'>" . htmlspecialchars($error_message) . "</span>";
-                     echo "</div>";
-                }
-                ?>
+                <?php if ($success_message): ?>
+                    <div class='border px-4 py-3 rounded relative mb-4 bg-green-100 border-green-400 text-green-700' role='alert'>
+                        <span class='block sm:inline'><?php echo htmlspecialchars($success_message); ?></span>
+                    </div>
+                 <?php endif; ?>
+                 <?php if ($error_message): ?>
+                    <div class='border px-4 py-3 rounded relative mb-4 bg-red-100 border-red-400 text-red-700' role='alert'>
+                        <span class='block sm:inline'><?php echo htmlspecialchars($error_message); ?></span>
+                    </div>
+                <?php endif; ?>
+                 <?php if ($fetch_error): ?>
+                    <div class='border px-4 py-3 rounded relative mb-4 bg-red-100 border-red-400 text-red-700' role='alert'>
+                        <span class='block sm:inline'><?php echo htmlspecialchars($fetch_error); ?></span>
+                    </div>
+                <?php endif; ?>
+
 
                 <div class="overflow-x-auto">
                     <table class="min-w-full bg-white">
@@ -197,8 +222,7 @@ function get_status_info($status, $start_date, $end_date) {
                             <tr>
                                 <th>ID</th>
                                 <th>Title</th>
-                                <th>Start Date</th>
-                                <th>End Date</th>
+                                <th>Dates</th>
                                 <th>Status</th>
                                 <th>Method</th>
                                 <th>Actions</th>
@@ -207,41 +231,92 @@ function get_status_info($status, $start_date, $end_date) {
                         <tbody>
                             <?php if (!empty($elections)): ?>
                                 <?php foreach ($elections as $election): ?>
-                                    <?php $status_info = get_status_info($election['Status'], $election['StartDate'], $election['EndDate']); ?>
+                                     <?php
+                                         // Ensure dates were parsed correctly before using them
+                                         $start_dt = $election['StartDateDT'];
+                                         $end_dt = $election['EndDateDT'];
+                                         $status_info = get_status_info($election['Status'], $start_dt, $end_dt, $now_dt);
+                                     ?>
                                     <tr>
                                         <td><?php echo $election['ElectionID']; ?></td>
                                         <td class="font-medium text-gray-900"><?php echo htmlspecialchars($election['Title']); ?></td>
-                                        <td><?php echo date('M j, Y g:i A', strtotime($election['StartDate'])); ?></td>
-                                        <td><?php echo date('M j, Y g:i A', strtotime($election['EndDate'])); ?></td>
+                                        <td class="text-xs">
+                                             <?php if ($start_dt): ?>
+                                                 Start: <?php echo $start_dt->format('M j, Y g:i A'); ?><br>
+                                             <?php endif; ?>
+                                             <?php if ($end_dt): ?>
+                                                 End: <?php echo $end_dt->format('M j, Y g:i A'); ?>
+                                             <?php endif; ?>
+                                        </td>
                                         <td>
-                                            <span class="text-xs font-semibold inline-block py-1 px-2 uppercase rounded-full text-white <?php echo $status_info['color']; ?>">
+                                            <span class="status-badge text-white <?php echo $status_info['color']; ?>">
                                                 <?php echo htmlspecialchars($status_info['text']); ?>
                                             </span>
                                         </td>
                                          <td><?php echo htmlspecialchars($election['VotingMethod']); ?></td>
-                                        <td>
-                                            <?php if ($election['Status'] === 'Pending' || $election['Status'] === 'Active' && $election['StartDate'] > $now): // Can edit if pending or upcoming ?>
-                                                <a href="election_edit.php?id=<?php echo $election['ElectionID']; ?>" class="action-btn bg-yellow-500 hover:bg-yellow-600 text-white" title="Edit Election"><i class="fas fa-edit"></i></a>
+                                        <td class="actions-cell whitespace-nowrap">
+                                            <?php // --- Action Buttons --- ?>
+
+                                            <?php // Activate Button Logic ?>
+                                            <?php if ($election['Status'] === 'Pending' && $start_dt && $start_dt <= $now_dt): ?>
+                                                <form action="includes/handle_election_status.php" method="POST">
+                                                    <input type="hidden" name="action" value="activate">
+                                                    <input type="hidden" name="election_id" value="<?php echo $election['ElectionID']; ?>">
+                                                    <input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>">
+                                                    <button type="submit" class="action-btn bg-green-500 hover:bg-green-600" title="Activate Election" onclick="return confirm('Activate this election? Voters will be able to vote.');">
+                                                        <i class="fas fa-play-circle mr-1"></i> Activate
+                                                    </button>
+                                                </form>
                                             <?php endif; ?>
-                                            <?php // Can manage candidates before election starts ?>
-                                             <a href="candidate_management.php?election_id=<?php echo $election['ElectionID']; ?>" class="action-btn bg-blue-500 hover:bg-blue-600 text-white" title="Manage Candidates"><i class="fas fa-users"></i></a>
+
+                                            <?php // Close Button Logic ?>
+                                            <?php if ($election['Status'] === 'Active' && $end_dt && $end_dt <= $now_dt): ?>
+                                                 <form action="includes/handle_election_status.php" method="POST">
+                                                    <input type="hidden" name="action" value="close">
+                                                    <input type="hidden" name="election_id" value="<?php echo $election['ElectionID']; ?>">
+                                                    <input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>">
+                                                    <button type="submit" class="action-btn bg-red-500 hover:bg-red-600" title="Close Election" onclick="return confirm('Manually close this election? Voting will stop.');">
+                                                        <i class="fas fa-stop-circle mr-1"></i> Close
+                                                    </button>
+                                                </form>
+                                            <?php endif; ?>
+
+                                            <?php // Edit Button Logic ?>
+                                            <?php if ($election['Status'] === 'Pending' || ($election['Status'] === 'Active' && $start_dt && $start_dt > $now_dt)): ?>
+                                                <a href="election_edit.php?id=<?php echo $election['ElectionID']; ?>" class="action-btn bg-yellow-500 hover:bg-yellow-600 text-white" title="Edit Election"><i class="fas fa-edit"></i> Edit</a>
+                                            <?php endif; ?>
+
+                                            <?php // Manage Candidates Button Logic (Allow before start) ?>
+                                            <?php if ($election['Status'] === 'Pending' || ($election['Status'] === 'Active' && $start_dt && $start_dt > $now_dt)): ?>
+                                                <a href="candidate_management.php?election_id=<?php echo $election['ElectionID']; ?>" class="action-btn bg-blue-500 hover:bg-blue-600 text-white" title="Manage Candidates"><i class="fas fa-users"></i> Candidates</a>
+                                            <?php endif; ?>
+
+                                            <?php // Manage Voters Button Logic (Allow before end?) ?>
+                                            <?php if ($election['Status'] !== 'Closed' && $election['Status'] !== 'Archived'): // Example: Allow until closed ?>
+                                                 <a href="voter_eligibility.php?election_id=<?php echo $election['ElectionID']; ?>" class="action-btn bg-cyan-500 hover:bg-cyan-600 text-white" title="Manage Eligible Voters"><i class="fas fa-user-check"></i> Voters</a>
+                                            <?php endif; ?>
+
+                                            <?php // View Results Button Logic ?>
                                             <?php if ($election['Status'] === 'Closed' || $election['Status'] === 'Archived'): ?>
-                                                <a href="results.php?election_id=<?php echo $election['ElectionID']; ?>" class="action-btn bg-purple-500 hover:bg-purple-600 text-white" title="View Results"><i class="fas fa-chart-bar"></i></a>
+                                                <a href="results.php?election_id=<?php echo $election['ElectionID']; ?>" class="action-btn bg-purple-500 hover:bg-purple-600 text-white" title="View Results"><i class="fas fa-chart-bar"></i> Results</a>
                                             <?php endif; ?>
-                                             <?php if ($election['Status'] === 'Pending' || $election['Status'] === 'Closed' || $election['Status'] === 'Archived'): // Allow delete for non-active ?>
-                                                 <a href="election_delete.php?id=<?php echo $election['ElectionID']; ?>"
-                                                    class="action-btn bg-red-500 hover:bg-red-600 text-white"
-                                                    title="Delete Election"
-                                                    onclick="return confirm('Are you sure you want to delete this election? This action cannot be undone.');">
-                                                     <i class="fas fa-trash-alt"></i>
-                                                 </a>
+
+                                             <?php // Delete Button Logic (Using POST Form) ?>
+                                             <?php if ($election['Status'] !== 'Active'): // Allow delete for non-active ?>
+                                                 <form action="includes/election_delete.php" method="POST" onsubmit="return confirm('Are you sure you want to delete this election? This action CANNOT be undone and requires the election to have no votes.');">
+                                                     <input type="hidden" name="id" value="<?php echo $election['ElectionID']; ?>">
+                                                     <input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>">
+                                                     <button type="submit" class="action-btn bg-red-600 hover:bg-red-700 text-white" title="Delete Election">
+                                                          <i class="fas fa-trash-alt"></i> Delete
+                                                     </button>
+                                                 </form>
                                              <?php endif; ?>
-                                             </td>
+                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
                             <?php else: ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-gray-500 py-4">No elections found.</td>
+                                    <td colspan="7" class="text-center text-gray-500 py-4">No elections found. <a href="election_create.php" class="text-indigo-600 hover:underline">Create one?</a></td>
                                 </tr>
                             <?php endif; ?>
                         </tbody>
