@@ -1,5 +1,5 @@
 <?php
-// results.php (Can be in root or admin folder, adjust paths accordingly)
+
 session_start();
 require_once 'includes/db_connect.php'; // Ensure this path is correct
 

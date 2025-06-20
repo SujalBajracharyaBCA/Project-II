@@ -373,11 +373,13 @@ if (!$can_vote && isset($error_message)) { // Check if error_message is set
                     const rankValues = []; // Store entered ranks
                     let hasDuplicate = false;
                     let outOfRange = false;
-                    const maxRank = rankInputs.length;
+                    const maxRank = rankInputs.length; // Max rank is the number of candidates
 
+                    let hasRankedAtLeastOne = false; // New flag
                     rankInputs.forEach(input => {
                         const rankValue = input.value.trim();
                         if (rankValue !== '') { // Only process non-empty inputs
+                            hasRankedAtLeastOne = true; // At least one candidate has been ranked
                             const rankNum = parseInt(rankValue, 10);
                             if (isNaN(rankNum) || rankNum < 1 || rankNum > maxRank) {
                                 outOfRange = true;
@@ -390,9 +392,10 @@ if (!$can_vote && isset($error_message)) { // Check if error_message is set
                         }
                     });
 
-                    // Check if ranks are sequential if needed (e.g., 1, 2, 3 not 1, 3, 5) - depends on rules
-                    // For simplicity, we only check for duplicates and range here.
-
+                    if (!hasRankedAtLeastOne) {
+                        errorDiv.textContent = 'Please rank at least one candidate.';
+                        isValid = false;
+                    }
                     if (outOfRange) {
                         errorDiv.textContent = `Ranks must be numbers between 1 and ${maxRank}.`;
                         isValid = false;
@@ -407,15 +410,21 @@ if (!$can_vote && isset($error_message)) { // Check if error_message is set
                      // Validate score inputs
                      const scoreInputs = form.querySelectorAll('input[name^="vote_data["]');
                      let scoreOutOfRange = false;
+                     let hasScoredAtLeastOne = false; // New flag
                      scoreInputs.forEach(input => {
                          const scoreValue = input.value.trim();
                          if (scoreValue !== '') { // Only validate if a score is entered
+                            hasScoredAtLeastOne = true; // At least one candidate has been scored
                             const scoreNum = parseInt(scoreValue, 10);
                             if (isNaN(scoreNum) || scoreNum < 0 || scoreNum > 10) { // Assuming 0-10 range
                                 scoreOutOfRange = true;
                             }
                          }
                      });
+                     if (!hasScoredAtLeastOne) {
+                        errorDiv.textContent = 'Please assign a score to at least one candidate.';
+                        isValid = false;
+                     }
                      if (scoreOutOfRange) {
                          errorDiv.textContent = 'Scores must be numbers between 0 and 10.';
                          isValid = false;
