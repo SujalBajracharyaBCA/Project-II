@@ -33,7 +33,7 @@ $vote_data_raw = isset($_POST['vote_data']) ? $_POST['vote_data'] : null;
 $submitted_voting_method = isset($_POST['voting_method']) ? $_POST['voting_method'] : '';
 
 // --- Basic Input Validation ---
-if ($election_id <= 0) { // Allow null/empty vote_data for Approval/Ranked/Score
+if ($election_id <= 0) {
     $_SESSION['vote_message'] = "Invalid submission data (Missing Election ID).";
     $_SESSION['vote_status'] = "error";
     header("Location: ../dashboard.php"); // Redirect to dashboard if election ID is missing
@@ -150,49 +150,86 @@ try {
         case 'RCV':
         case 'STV':
         case 'Condorcet':
-            if (is_array($vote_data_raw)) {
+            if (is_array($vote_data_raw) && !empty($vote_data_raw)) { // Must be an array and not empty
                 $ranked_votes = [];
                 $used_ranks = [];
-                $max_rank = count($candidates_map);
-                foreach ($vote_data_raw as $cand_id_str => $rank_str) {
-                    if (trim($rank_str) === '') continue; // Skip empty ranks
+                $max_rank = count($candidates_map); // Max rank is the number of candidates
 
+                // First, convert string keys from POST (candidate ID strings) to integers and collect all entered ranks
+                $submitted_ranks = [];
+                foreach ($vote_data_raw as $cand_id_str => $rank_str) {
                     $cand_id = filter_var($cand_id_str, FILTER_VALIDATE_INT);
                     $rank = filter_var($rank_str, FILTER_VALIDATE_INT);
 
-                    if ($cand_id === false || !isset($candidates_map[$cand_id])) throw new Exception("Invalid candidate ID ($cand_id_str) submitted for ranking.");
-                    if ($rank === false || $rank < 1 || $rank > $max_rank) throw new Exception("Invalid rank ($rank_str) submitted. Must be between 1 and $max_rank.");
-                    if (isset($used_ranks[$rank])) throw new Exception("Duplicate rank ($rank) submitted. Ranks must be unique.");
+                    // Skip empty rank entries, but ensure at least one valid rank is submitted later
+                    if (trim((string)$rank_str) === '') {
+                        continue;
+                    }
 
-                    $ranked_votes[$cand_id] = $rank;
+                    if ($cand_id === false || !isset($candidates_map[$cand_id])) {
+                        throw new Exception("Invalid candidate ID ($cand_id_str) submitted for ranking.");
+                    }
+                    if ($rank === false || $rank < 1 || $rank > $max_rank) {
+                        throw new Exception("Invalid rank ($rank_str) submitted for candidate ($cand_id). Must be between 1 and $max_rank.");
+                    }
+                    if (isset($used_ranks[$rank])) {
+                        throw new Exception("Duplicate rank ($rank) submitted. Ranks must be unique.");
+                    }
+
+                    $submitted_ranks[$cand_id] = $rank;
                     $used_ranks[$rank] = true;
                 }
-                $vote_data_processed = json_encode($ranked_votes);
+
+                if (empty($submitted_ranks)) {
+                    throw new Exception("Please rank at least one candidate for ranked voting.");
+                }
+
+                // Sort the ranked votes by rank to store them in a consistent order
+                asort($submitted_ranks); // Sort by value (rank)
+                $ordered_candidate_ids = array_keys($submitted_ranks); // Get candidate IDs in ranked order
+
+                // Store as a JSON array of candidate IDs in ranked order
+                $vote_data_processed = json_encode($ordered_candidate_ids);
                 $validation_passed = true;
             } else {
-                 throw new Exception("Invalid data format for ranked voting.");
+                 throw new Exception("Invalid data format or no candidates ranked for ranked voting.");
             }
             break;
 
          case 'Score':
-             if (is_array($vote_data_raw)) {
+             if (is_array($vote_data_raw) && !empty($vote_data_raw)) { // Must be an array and not empty
                  $scored_votes = [];
-                 $min_score = 0; $max_score = 10; // Define score range
+                 $min_score = 0; $max_score = 10; // Define score range as per vote.php frontend
+                 $has_at_least_one_score = false;
+
                  foreach ($vote_data_raw as $cand_id_str => $score_str) {
-                     if (trim($score_str) === '') continue; // Skip empty scores
+                     // Skip empty score entries
+                     if (trim((string)$score_str) === '') {
+                         continue;
+                     }
 
                      $cand_id = filter_var($cand_id_str, FILTER_VALIDATE_INT);
                      $score = filter_var($score_str, FILTER_VALIDATE_INT);
 
-                     if ($cand_id === false || !isset($candidates_map[$cand_id])) throw new Exception("Invalid candidate ID ($cand_id_str) submitted for scoring.");
-                     if ($score === false || $score < $min_score || $score > $max_score) throw new Exception("Invalid score ($score_str) submitted. Must be between $min_score and $max_score.");
-
+                     if ($cand_id === false || !isset($candidates_map[$cand_id])) {
+                         throw new Exception("Invalid candidate ID ($cand_id_str) submitted for scoring.");
+                     }
+                     if ($score === false || $score < $min_score || $score > $max_score) {
+                         throw new Exception("Invalid score ($score_str) submitted for candidate ($cand_id). Must be between $min_score and $max_score.");
+                     }
+                     
                      $scored_votes[$cand_id] = $score;
+                     $has_at_least_one_score = true;
                  }
-                 $vote_data_processed = json_encode($scored_votes);
+
+                 if (!$has_at_least_one_score) {
+                     throw new Exception("Please assign a score to at least one candidate for score voting.");
+                 }
+
+                 $vote_data_processed = json_encode($scored_votes); // Store as JSON object (candidate_id: score)
                  $validation_passed = true;
              } else {
-                  throw new Exception("Invalid data format for score voting.");
+                  throw new Exception("Invalid data format or no candidates scored for score voting.");
              }
              break;
 
